@@ -173,3 +173,17 @@ class MultifidelityNetwork(tf.keras.Model):
         """
         print('Loading weights from: ' + load_path)
         self.autoencoder.load_weights(load_path)
+
+#%%
+def sliding_windows(data_input, data_output, seq_length, freq=1):
+    x = []
+    y = []
+
+    for i in range(data_input.shape[0]):
+        for j in range(0, data_input.shape[1] - seq_length, freq):
+            _x = data_input[i, j:(j + seq_length), :]
+            _y = data_output[i, j:(j + seq_length), :]
+            x.append(_x)
+            y.append(_y)
+
+    return np.array(x), np.array(y)

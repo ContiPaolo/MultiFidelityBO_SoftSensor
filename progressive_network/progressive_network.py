@@ -13,12 +13,27 @@ from tensorflow.keras.layers import Input, Dense, LSTM, Add, Lambda, BatchNormal
 from tensorflow.keras.layers import concatenate
 import tensorflow as tf
 
-#%%
+
+class RescaleLayer(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(RescaleLayer, self).__init__(**kwargs)
+        # Initialize the scaling constant with a constraint to keep it in [0, 1]
+        self.scale = self.add_weight(name='scale', 
+                                     shape=(1,),
+                                     initializer='zeros', 
+                                     trainable=True,
+                                     constraint=tf.keras.constraints.MinMaxNorm(min_value=0.0, max_value=1.0, rate=1.0, axis=0))
+
+    def call(self, inputs):
+        # Rescale the input and return
+        return inputs * self.scale
 
 class MultifidelityNetwork(tf.keras.Model):
     def __init__(self, params, input_dim, latent_dim, output_dim, prev_models = [], prev_inputs = []):
         super().__init__()
+        self.level = len(prev_models)
         self.build_model(params, input_dim, latent_dim, output_dim, prev_models, prev_inputs)
+        
 
 
     def build_model(self, params, input_dim, latent_dim, output_dim, prev_models, prev_inputs):
@@ -60,10 +75,10 @@ class MultifidelityNetwork(tf.keras.Model):
         :param prev_inputs: list of previous inputs
         :return: current input data tensor and list of previous input data tensors
         '''
-        data_input = Input(shape=(input_dim,))
+        data_input = Input(shape=(None, input_dim))
         prev_data_inputs = []
         for prev_input in prev_inputs:
-            prev_data_input = Input(shape=(prev_input.shape[1],))
+            prev_data_input = Input(shape=(None, prev_input.shape[1]))
             prev_data_input.trainable = False
             prev_data_inputs.append(prev_data_input)
         return data_input, prev_data_inputs
@@ -81,13 +96,18 @@ class MultifidelityNetwork(tf.keras.Model):
             latent = encoder_input
         else:
             h = encoder_input
-            for nodes in params['layers_encoder']:
-                h = Dense(nodes,  activation = params['activation'], kernel_regularizer=l2(params['l2weight']), kernel_initializer=params['kernel_init'])(h)
+            for lay, nodes in enumerate(params['layers_encoder']):
+                name = 'encoder_' + str(lay) + '_level_' + str(self.level)
+                if params['model_type_encoder'] == 'LSTM':
+                    h = LSTM(nodes, activation = params['activation'], kernel_regularizer=l2(params['l2weight']), kernel_initializer=params['kernel_init'], return_sequences = True, name = name)(h)
+                elif params['model_type_encoder'] == 'Dense':
+                    h = Dense(nodes,  activation = params['activation'], kernel_regularizer=l2(params['l2weight']), kernel_initializer=params['kernel_init'], name = name)(h)
+            name = 'encoder_output_' + str(self.level)
             latent = Dense(latent_dim, activation = 'linear', kernel_regularizer=l2(params['l2weight']), kernel_initializer=params['kernel_init'])(h)
         return latent
 
 
-    def concatenate_latents(self, latent, prev_data_inputs, prev_models, concatenate_inputs = False):
+    def concatenate_latents(self, latent, prev_data_inputs, prev_models, concatenate_inputs = True):
         '''
         Concatenate the current latent variable with the previous ones.
         :param latent: current latent variable
@@ -98,7 +118,7 @@ class MultifidelityNetwork(tf.keras.Model):
         if not concatenate_inputs:
             print('Not concatenating')
             return latent
-      
+
         if len(prev_models) == 0:
             #if this is the first level just return the current latent variable
             latent_tot = latent
@@ -108,11 +128,10 @@ class MultifidelityNetwork(tf.keras.Model):
                 #make previous models non-trainable
                 prev_model.encoder.trainable = False
                 #compute latent of previous models
-                latent_prevs.append(prev_model.encoder(prev_input))
+                latent_prevs.append(RescaleLayer()(prev_model.encoder(prev_input)))
             #concatenate all latents
             latent_tot = concatenate(latent_prevs)
         return latent_tot
-        
 
 
     def build_decoder(self, params, latent_tot, output_dim):
@@ -122,9 +141,14 @@ class MultifidelityNetwork(tf.keras.Model):
         :param output_dim: dimension of the output space
         '''
         h = latent_tot
-        for nodes in params['layers_decoder']:
-            h = Dense(nodes,  activation = params['activation'], kernel_regularizer=l2(params['l2weight']),kernel_initializer=params['kernel_init'])(h)
-        decoder_output = Dense(output_dim, activation = 'linear', kernel_regularizer=l2(params['l2weight']),kernel_initializer=params['kernel_init'])(h)
+        for lay, nodes in enumerate(params['layers_decoder']):
+            name = 'decoder_' + str(lay) + '_level_' + str(self.level)
+            if params['model_type_decoder'] == 'LSTM':
+                h = LSTM(nodes, activation = params['activation'], kernel_regularizer=l2(params['l2weight']), kernel_initializer=params['kernel_init'], return_sequences = True, name = name)(h)
+            elif params['model_type_decoder'] == 'Dense':
+                h = Dense(nodes,  activation = params['activation'], kernel_regularizer=l2(params['l2weight']),kernel_initializer=params['kernel_init'], name = name)(h)
+        name = 'decoder_output_' + str(self.level)
+        decoder_output = Dense(output_dim, activation = 'linear', kernel_regularizer=l2(params['l2weight']),kernel_initializer=params['kernel_init'], name = name)(h)
         return decoder_output
 
     
@@ -175,15 +199,12 @@ class MultifidelityNetwork(tf.keras.Model):
         self.autoencoder.load_weights(load_path)
 
 #%%
-def sliding_windows(data_input, data_output, seq_length, freq=1):
+def sliding_windows(data_input, seq_length, freq=1):
     x = []
-    y = []
 
     for i in range(data_input.shape[0]):
         for j in range(0, data_input.shape[1] - seq_length, freq):
             _x = data_input[i, j:(j + seq_length), :]
-            _y = data_output[i, j:(j + seq_length), :]
             x.append(_x)
-            y.append(_y)
 
-    return np.array(x), np.array(y)
+    return np.array(x)
